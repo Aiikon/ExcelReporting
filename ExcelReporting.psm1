@@ -420,6 +420,10 @@ Function Out-Excel
         if (-not $NoAutoFit.IsPresent)
         {
             [void]$workbook.ActiveSheet.Range("A1").CurrentRegion.Columns.AutoFit()
+            $range = $workbook.ActiveSheet.Range("A1")
+            [void]$range.Select()
+            [void]$range.AutoFilter()
+            $workbook.ActiveSheet.Rows[1].Font.FontStyle = 'Bold'
         }
         $excel.Visible = $true
 
