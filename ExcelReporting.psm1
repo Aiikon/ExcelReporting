@@ -3,54 +3,30 @@ Function Import-Excel
     Param
     (
         [Parameter(Mandatory=$true, Position=0)] [string] $FilePath,
-        [Parameter()] [string] $SheetName,
-        [Parameter()] [int] $HeaderRow,
-        [Parameter()] [string[]] $Header
+        [Parameter()] [string] $SheetName
     )
     End
     {
-        $importCsvArgs = @{}
-        if ($Header)
-        {
-            $HeaderRow += 1
-            $importCsvArgs.Header = $Header
-        }
+        trap { $PSCmdlet.ThrowTerminatingError($_) }
 
-        $finalPath = $null
-
-        try
-        {
-            $finalPath = Resolve-Path $FilePath -ErrorAction Stop | Select-Object -ExpandProperty ProviderPath
-        }
-        catch
-        {
-            throw "File $FilePath not found."
-            return
-        }
-
+        $finalPath = $PSCmdlet.GetResolvedProviderPathFromPSPath($FilePath)
         $tempFile = [System.IO.Path]::GetTempFileName()
 
         $excel = New-Object -ComObject Excel.Application
-        $excel.Application.Workbooks.Open($finalPath, $null, $true) | Out-Null
+        [void]$excel.Application.Workbooks.Open($finalPath, $null, $true)
         $excel.DisplayAlerts = $false
 
         if ($SheetName)
         {
             $activeSheet = $excel.Application.ActiveWorkbook.Sheets |
-                Where-Object { $_.Name -ieq $SheetName } |
+                Where-Object { $_.Name -eq $SheetName } |
                 Select-Object -First 1
 
-            if (!$activeSheet) { throw "Unable to find worksheet: $SheetName." }
+            if (!$activeSheet) { throw "Unable to find a worksheet titled '$SheetName'." }
         }
         else
         {
             $activeSheet = $excel.ActiveSheet
-        }
-
-        if ($HeaderRow -and $HeaderRow -ne 1)
-        {
-            $prev = $HeaderRow - 1
-            [void]$activeSheet.Range("1:$prev").Delete()
         }
 
         $activeSheet.SaveAs($tempFile, 6)
@@ -61,9 +37,8 @@ Function Import-Excel
         Remove-Variable excel, activeSheet
         [GC]::Collect()
 
-        Import-Csv $tempFile -Encoding ASCII @importCsvArgs
-
-        Remove-Item $tempFile
+        Import-Csv $tempFile -Encoding ASCII
+        [System.IO.File]::Delete($tempFile)
     }
 }
 
@@ -77,33 +52,11 @@ Function Export-Excel
     )
     Begin
     {
-        if (Test-Path $FilePath)
-        {
-            try
-            {
-                Remove-Item -Force -Path $FilePath
-            }
-            catch
-            {
-                throw $_
-                return
-            }
-        }
+        trap { $PSCmdlet.ThrowTerminatingError($_) }
 
-        $finalPath = $null
-        try
-        {
-            '' | Out-File $FilePath -ErrorAction Stop
-            $finalPath = Resolve-Path $FilePath | Select-Object -ExpandProperty Path
-            Remove-Item $FilePath -ErrorAction Stop
-        }
-        catch
-        {
-            throw $_
-            return
-        }
+        $finalPath = $PSCmdlet.GetResolvedProviderPathFromPSPath($FilePath)
 
-        $objects = New-Object System.Collections.Generic.List``1[System.Object]
+        $objects = New-Object System.Collections.Generic.List[object]
     }
     Process
     {
@@ -115,10 +68,9 @@ Function Export-Excel
         $objects | Export-Csv $tempFile -NoTypeInformation
 
         $excel = New-Object -ComObject Excel.Application
-        #                                    (Filename,  Origin, StartRow, DataType, TextQualifier, Consecutive, Tab   , Semic , Comma)
-        $excel.Application.Workbooks.OpenText($tempFile, $null , 1  , 1       , 1            , $false     , $false, $false, $true)
+        $excel.Application.Workbooks.OpenText($tempFile, $null, 1, 1, 1, $false, $false, $false, $true)
         $columns = $excel.Application.ActiveSheet.Range("A:Z").Columns
-        $columns.AutoFit() | Out-Null
+        [void]$columns.AutoFit()
         $excel.Application.ActiveWorkbook.SaveAs($finalPath, 51)
 
         if ($Open)
@@ -135,7 +87,103 @@ Function Export-Excel
         while ([System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) -gt 0) { }
         Remove-Variable excel, columns
         [GC]::Collect()
-        Remove-Item $tempFile
+        [System.IO.File]::Delete($tempFile)
+    }
+}
+
+Function Get-ExcelWorkbook
+{
+    try { [void][Rhodium.ExcelReporting.ExcelHelper] } catch {
+        Add-Type -ReferencedAssemblies "Microsoft.Office.Interop.Excel" '
+        using System;
+        using System.Diagnostics;
+        using System.Collections.Generic;
+        using System.Text;
+        using Excel = Microsoft.Office.Interop.Excel;
+        using System.Runtime.InteropServices;
+
+        namespace Rhodium.ExcelReporting
+        {
+            public class ExcelHelper
+            {
+                [DllImport("Oleacc.dll")]
+                public static extern int AccessibleObjectFromWindow(
+                    int hwnd, uint dwObjectID, byte[] riid,
+                    ref Microsoft.Office.Interop.Excel.Window ptr);
+
+                public delegate bool EnumChildCallback(int hwnd, ref int lParam);
+
+                [DllImport("User32.dll")]
+                public static extern bool EnumChildWindows(
+                    int hWndParent, EnumChildCallback lpEnumFunc,
+                    ref int lParam);
+
+
+                [DllImport("User32.dll")]
+                public static extern int GetClassName(
+                    int hWnd, StringBuilder lpClassName, int nMaxCount);
+
+                public static bool EnumChildProc(int hwndChild, ref int lParam)
+                {
+                    StringBuilder buf = new StringBuilder(128);
+                    GetClassName(hwndChild, buf, 128);
+                    if (buf.ToString() == "EXCEL7")
+                    {
+                        lParam = hwndChild;
+                        return false;
+                    }
+                    return true;
+                }
+
+                public static List<object> GetExcelApplicationList()
+                {
+                    List<object> results = new List<object>();
+
+                    EnumChildCallback cb;
+                    List<Process> procs = new List<Process>();
+                    procs.AddRange(Process.GetProcessesByName("excel"));
+
+                    foreach (Process p in procs)
+                    {
+                        if ((int)p.MainWindowHandle > 0)
+                        {
+                            int childWindow = 0;
+                            cb = new EnumChildCallback(EnumChildProc);
+                            EnumChildWindows((int)p.MainWindowHandle, cb, ref childWindow);
+
+                            if (childWindow > 0)
+                            {
+                                const uint OBJID_NATIVEOM = 0xFFFFFFF0;
+                                Guid IID_IDispatch = new Guid("{00020400-0000-0000-C000-000000000046}");
+                                Excel.Window window = null;
+                                int res = AccessibleObjectFromWindow(childWindow, OBJID_NATIVEOM, IID_IDispatch.ToByteArray(), ref window);
+                                if (res >= 0)
+                                {
+                                    results.Add(window.Application);
+                                }
+                            }
+                        }
+                    }
+
+                    return results;
+                }
+            }
+        }
+        '
+    }
+
+    foreach ($application in [Rhodium.ExcelReporting.ExcelHelper]::GetExcelApplicationList())
+    {
+        foreach ($workbook in $application.Workbooks)
+        {
+            $result = [ordered]@{}
+            $result.WorkbookName = $workbook.Name
+            $result.Handles = [pscustomobject]@{
+                Application = $application
+                Workbook = $workbook
+            }
+            [pscustomobject]$result
+        }
     }
 }
 
@@ -143,108 +191,53 @@ Function Read-ExcelWindow
 {
     Param
     (
-        [Parameter()] [switch] $NoHidden,
-        [Parameter(Position=0)] [object] $Workbook,
-        [Parameter(Position=1)] [object] $Sheet,
-        [Parameter()] [int] $HeaderRow = 1
+        [Parameter()] [switch] $GetHidden,
+        [Parameter()] [switch] $Ask,
+        [Parameter()] [object] $Workbook
     )
     End
     {
-        $workbookIsString = $Workbook -and $Workbook.GetType().FullName -ieq 'System.String'
-        $sheetIsString = $Sheet -and $Sheet.GetType().FullName -ieq 'System.String'
-        if ($workbookIsString)
+        trap { $PSCmdlet.ThrowTerminatingError($_) }
+
+        if (!$Workbook)
         {
-            $excel = [Runtime.Interopservices.Marshal]::GetActiveObject('Excel.Application')
-            $activeWorkbook = $excel.Workbooks |
-                Where-Object { $_.Name -like "$workbook.*" } |
-                Select-Object -First 1
-
-            if (!$activeWorkbook) { throw "Unable to find workbook: $Workbook." }
-
-            if ($Sheet -and -not $sheetIsString)
-            { throw "Sheet must be a string if workbook is specified." }
-
-            if ($Sheet)
-            {
-                $activeSheet = $activeWorkbook.Sheets |
-                    Where-Object { $_.Name -ieq $Sheet } |
-                    Select-Object -First 1
-
-                if (!$activeSheet) { throw "Unable to find worksheet: $Sheet." }
-            }
-            else
-            {
-                $activeSheet = $activeWorkbook.ActiveSheet
-            }
+            $workbookList = Get-ExcelWorkbook
+            if (!$workbookList) { throw "No workbooks are open. If a cell is in Edit mode the workbook won't show." }
+            if ($Ask) { $workbook = $workbookList | Out-GridView -Title "Select a workbook" -OutputMode Single }
+            else { $workbook = $workbookList | Select-Object -First 1 }
+            if (!$Workbook) { throw "No workbook selected." }
         }
-        else
-        {
-            if ($Sheet -and -not $sheetIsString)
-            {
-                $activeSheet = $Sheet
-            }
-            elseif ($Sheet -and $sheetIsString)
-            {
-                $excel = [Runtime.Interopservices.Marshal]::GetActiveObject('Excel.Application')
-                $activeSheet = $excel.ActiveWorkbook.Sheets |
-                    Where-Object { $_.Name -ieq $Sheet } |
-                    Select-Object -First 1
+        
+        $activeSheet = $Workbook.Handles.Workbook.ActiveSheet
 
-                if (!$activeSheet) { throw "Unable to find worksheet: $Sheet." }
-            }
-            else
-            {
-                $excel = [Runtime.Interopservices.Marshal]::GetActiveObject('Excel.Application')
-                $activeSheet = $excel.ActiveSheet
-            }
+        if ($GetHidden)
+        {
+            $tempWorkbook = $activeSheet.Application.Workbooks.Add()
+            $activeSheet.Copy($tempWorkbook.ActiveSheet)
+            $activeSheet = $tempWorkbook.ActiveSheet
+            $activeSheet.Rows.Hidden = $false
+            $activeSheet.Columns.Hidden = $false
+            $activeSheet.AutoFilterMode = $false
         }
 
-        if (-not $activeSheet)
-        {
-            throw "Unable to access Excel sheet. Cell may be in edit mode."
-        }
-
-        $region = $activeSheet.Cells.Item($HeaderRow,1).CurrentRegion
-
-        if (!$NoHidden)
-        {
-            $hiddenColumns = $region.Columns |
-                Where-Object Hidden
-            $hiddenColumns | ForEach-Object { $_.Hidden = $false }
-            $hiddenRows = $region.Rows |
-                Where-Object Hidden
-            $hiddenRows | ForEach-Object { $_.Hidden = $false }
-        }
-        if ($HeaderRow -ne 1)
-        {
-            $firstCell = $region.Cells.Item($HeaderRow, 1)
-            $lastCell = $region.Cells.Item($region.EntireRow.Count - $HeaderRow + 1, $region.EntireColumn.Count)
-            $region = $activeSheet.Range($firstCell, $lastCell)
-        }
-
+        $range = $activeSheet.Range("A1").CurrentRegion
         $oldClipboard = [System.Windows.Forms.Clipboard]::GetText()
-
-        [void]$region.Copy()
+        [void]$range.Copy()
 
         $clipboard = [System.Windows.Forms.Clipboard]::GetText()
+
+        [void]$activeSheet.Range("A1").Copy()
+
+        if ($GetHidden)
+        {
+            $tempWorkbook.Close($false)
+        }
 
         if ($oldClipboard)
         {
             [System.Windows.Forms.Clipboard]::SetText($oldClipboard)
         }
         else { [System.Windows.Forms.Clipboard]::Clear() }
-
-        if (!$NoHidden)
-        {
-            $hiddenColumns | ForEach-Object { $_.Hidden = $true }
-            $hiddenRows | ForEach-Object { $_.Hidden = $true }
-        }
-
-        if (-not ($sheetIsString -or $workbookIsString))
-        {
-            #Remove-Variable Workbook, Sheet, activeWorkbook, activeSheet, excel, hiddenColumns, hiddenRows, region  -ErrorAction Ignore
-            #[GC]::Collect()
-        }
 
         $clipboard | ConvertFrom-Csv -Delimiter "`t"
     }
@@ -257,28 +250,32 @@ Function Update-ExcelWindow
         [Parameter(Mandatory=$true, ValueFromPipeline=$true)] [object] $InputObject,
         [Parameter(Mandatory=$true, Position=0)] [string] $InputKey,
         [Parameter(Position=1)] [string] $ExcelKey,
-        [Parameter()] [string] $TimestampColumn,
-        [Parameter()] [string[]] $TimestampTestColumns,
-        [Parameter()] [switch] $NoHidden
+        [Parameter()] [string] $Ask,
+        [Parameter()] [object] $Workbook,
+        [Parameter()] [switch] $AddInputColumns
     )
     Begin
     {
-        if (!(Get-Command "ConvertTo-Hashtable")) { throw "The Data module is required." }
-
         if (!$ExcelKey) { $ExcelKey = $InputKey }
 
-        $excel = [Runtime.Interopservices.Marshal]::GetActiveObject('Excel.Application')
-        $sheet = $excel.ActiveSheet
+        if (!$Workbook)
+        {
+            $workbookList = Get-ExcelWorkbook
+            if (!$workbookList) { throw "No workbooks are open. If a cell is in Edit mode the workbook won't show." }
+            if ($Ask) { $workbook = $workbookList | Out-GridView -Title "Select a workbook" -OutputMode Single }
+            else { $workbook = $workbookList | Select-Object -First 1 }
+            if (!$Workbook) { throw "No workbook selected." }
+        }
 
-        $excelData = Read-ExcelWindow -NoHidden:$NoHidden
-
+        $excelData = Read-ExcelWindow -Workbook $Workbook -GetHidden
+        
         $excelIndices = @{}
         $excelHash = @{}
 
         $i = 2
         foreach ($data in $excelData)
         {
-            $excelKeyValue = $data.$Excelkey
+            $excelKeyValue = & $Script:GetKeyValue $data $Excelkey
 
             if (-not $excelIndices.ContainsKey($excelKeyValue))
             {
@@ -288,30 +285,68 @@ Function Update-ExcelWindow
 
             $excelIndices.$excelKeyValue.Add($i)
             $excelHash.$excelKeyValue.Add($data)
-
+            
             $i += 1
         }
 
         $excelPropertyHash = @{}
         $i = 1
-        foreach ($oldProperty in ($data.psobject.Properties | Select-Object -ExpandProperty Name))
+        foreach ($oldProperty in ($data.PSObject.Properties.Name))
         {
             $excelPropertyHash.Add($oldProperty, $i)
             $i += 1
         }
 
         $inputProperties = $null
+        $usedKeys = @{}
+        $activeSheet = $Workbook.Handle.Workbook.ActiveSheet
     }
     Process
     {
         if (!$inputProperties)
         {
             $inputProperties = @{}
-            $InputObject | Get-PropertyName | % { $inputProperties.Add($_, $null) }
+            foreach ($property in $InputObject.PSObject.Properties.Name)
+            {
+                $inputProperties.Add($property, $null)
+            }
+
+            if ($AddInputColumns)
+            {
+                $row1 = $activeSheet.Rows[1]
+                $columnList = foreach ($cell in $row1.Cells)
+                {
+                    $cellObj = [ordered]@{}
+                    $cellObj.Column = $cell.Column
+                    $cellObj.Header = $cell.Value2
+                    if (!$cellObj.Header) { break }
+                    [pscustomobject]$cellObj
+                }
+                $currentColumnNames = $columnList.Header
+                $newColumnNames = $InputObject.PSObject.Properties.Name |
+                    Where-Object { $_ -notin $currentColumnNames } |
+                    Where-Object { $_ -notin $InputKey }
+                if ($newColumnNames)
+                {
+                    $i = $currentColumnNames.Count + 1
+                    foreach ($newColumnName in $newColumnNames)
+                    {
+                        Write-Verbose "Adding column '$newColumnName'"
+                        $activeSheet.Cells(1, $i).Value2 = $newColumnName
+                        $excelPropertyHash[$newColumnName] = $i
+                        $i += 1
+                    }
+                }
+            }
         }
-        $keyValue = "$($InputObject.$InputKey)"
+        $keyValue = & $Script:GetKeyValue $InputObject $InputKey
         if ($excelHash.ContainsKey($keyValue))
         {
+            if ($usedKeys.$keyValue)
+            {
+                Write-Warning "The key '$keyValue' has already been used and the previous values may be overwritten."
+            }
+            $usedKeys.$keyValue = $true
             $i = 0
             foreach ($excelRecord in $excelHash[$keyValue])
             {
@@ -322,7 +357,7 @@ Function Update-ExcelWindow
                     if ($inputProperties.ContainsKey($excelProperty) -and "$($InputObject.$excelProperty)" -ne $excelRecord.$excelProperty)
                     {
                         $column = $excelPropertyHash[$excelProperty]
-                        $sheet.Cells.Item($row, $column) = $InputObject.$excelProperty
+                        $activeSheet.Cells.Item($row, $column) = $InputObject.$excelProperty
                         Write-Verbose "Updating ($row) $keyValue column $excelProperty with $($InputObject.$excelProperty)."
                         if (-not $TimestampTestColumns -or $excelProperty -iin $TimestampTestColumns)
                         {
@@ -333,19 +368,11 @@ Function Update-ExcelWindow
                 if ($updated -and $TimestampColumn)
                 {
                     Write-Verbose "Updating ($row) $keyValue column $TimestampColumn with $([DateTime]::Now)."
-                    $sheet.Cells.Item($row, $excelPropertyHash[$TimestampColumn]) = [DateTime]::Now
+                    $activeSheet.Cells.Item($row, $excelPropertyHash[$TimestampColumn]) = [DateTime]::Now
                 }
                 $i += 1
             }
         }
-    }
-    End
-    {
-        #[void][System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel)
-        #while ([System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) -gt 0) { }
-        #while ([System.Runtime.Interopservices.Marshal]::ReleaseComObject($sheet) -gt 0) { }
-        #Remove-Variable excel, sheet -ErrorAction Ignore
-        #[GC]::Collect()
     }
 }
 
