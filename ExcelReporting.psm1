@@ -248,11 +248,12 @@ Function Update-ExcelWindow
     Param
     (
         [Parameter(Mandatory=$true, ValueFromPipeline=$true)] [object] $InputObject,
-        [Parameter(Mandatory=$true, Position=0)] [string] $InputKey,
-        [Parameter(Position=1)] [string] $ExcelKey,
-        [Parameter()] [string] $Ask,
+        [Parameter(Mandatory=$true, Position=0)] [string[]] $InputKey,
+        [Parameter(Position=1)] [string[]] $ExcelKey,
+        [Parameter()] [swirch] $Ask,
         [Parameter()] [object] $Workbook,
-        [Parameter()] [switch] $AddInputColumns
+        [Parameter()] [switch] $AddInputColumns,
+        [Parameter()] [string] $KeyJoin = '|'
     )
     Begin
     {
@@ -275,7 +276,7 @@ Function Update-ExcelWindow
         $i = 2
         foreach ($data in $excelData)
         {
-            $excelKeyValue = & $Script:GetKeyValue $data $Excelkey
+            $excelKeyValue = $(foreach ($key in $ExcelKey) { $data.$key }) -join $KeyJoin
 
             if (-not $excelIndices.ContainsKey($excelKeyValue))
             {
@@ -299,7 +300,7 @@ Function Update-ExcelWindow
 
         $inputProperties = $null
         $usedKeys = @{}
-        $activeSheet = $Workbook.Handle.Workbook.ActiveSheet
+        $activeSheet = $Workbook.Handles.Workbook.ActiveSheet
     }
     Process
     {
@@ -339,7 +340,7 @@ Function Update-ExcelWindow
                 }
             }
         }
-        $keyValue = & $Script:GetKeyValue $InputObject $InputKey
+        $keyValue = $(foreach ($key in $InputKey) { $InputObject.$key }) -join $KeyJoin
         if ($excelHash.ContainsKey($keyValue))
         {
             if ($usedKeys.$keyValue)
