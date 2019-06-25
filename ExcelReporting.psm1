@@ -9,7 +9,7 @@ Function Import-Excel
     {
         trap { $PSCmdlet.ThrowTerminatingError($_) }
 
-        $finalPath = $PSCmdlet.GetResolvedProviderPathFromPSPath($FilePath)
+        $finalPath = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($FilePath)
         $tempFile = [System.IO.Path]::GetTempFileName()
 
         $excel = New-Object -ComObject Excel.Application
@@ -54,7 +54,7 @@ Function Export-Excel
     {
         trap { $PSCmdlet.ThrowTerminatingError($_) }
 
-        $finalPath = $PSCmdlet.GetResolvedProviderPathFromPSPath($FilePath)
+        $finalPath = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($FilePath)
 
         $objects = New-Object System.Collections.Generic.List[object]
     }
