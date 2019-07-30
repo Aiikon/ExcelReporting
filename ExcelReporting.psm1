@@ -250,7 +250,7 @@ Function Update-ExcelWindow
         [Parameter(Mandatory=$true, ValueFromPipeline=$true)] [object] $InputObject,
         [Parameter(Mandatory=$true, Position=0)] [string[]] $InputKey,
         [Parameter(Position=1)] [string[]] $ExcelKey,
-        [Parameter()] [swirch] $Ask,
+        [Parameter()] [switch] $Ask,
         [Parameter()] [object] $Workbook,
         [Parameter()] [switch] $AddInputColumns,
         [Parameter()] [string] $KeyJoin = '|'
@@ -355,7 +355,7 @@ Function Update-ExcelWindow
                 foreach ($excelProperty in $excelPropertyHash.Keys)
                 {
                     $row = $excelIndices[$keyValue][$i]
-                    if ($inputProperties.ContainsKey($excelProperty) -and "$($InputObject.$excelProperty)" -ne $excelRecord.$excelProperty)
+                    if ($inputProperties.ContainsKey($excelProperty) -and "$($InputObject.$excelProperty)" -ne "$($excelRecord.$excelProperty)")
                     {
                         $column = $excelPropertyHash[$excelProperty]
                         $activeSheet.Cells.Item($row, $column) = $InputObject.$excelProperty
